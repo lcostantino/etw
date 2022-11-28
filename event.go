@@ -1,4 +1,5 @@
-//+build windows
+//go:build windows
+// +build windows
 
 package etw
 
@@ -7,6 +8,7 @@ package etw
 */
 import "C"
 import (
+	"encoding/base64"
 	"fmt"
 	"math"
 	"time"
@@ -22,8 +24,9 @@ import (
 // Events will be passed to the user EventCallback. It's invalid to use Event
 // methods outside of an EventCallback.
 type Event struct {
-	Header      EventHeader
-	eventRecord C.PEVENT_RECORD
+	Header          EventHeader
+	eventRecord     C.PEVENT_RECORD
+	RawEncodedEvent string
 }
 
 // EventHeader contains an information that is common for every ETW event
@@ -77,6 +80,10 @@ type EventDescriptor struct {
 	Keyword uint64
 }
 
+func (e *Event) GetRawRecord() C.PEVENT_RECORD {
+	return e.eventRecord
+}
+
 // EventProperties returns a map that represents events-specific data provided
 // by event producer. Returned data depends on the provider, event type and even
 // provider and event versions.
@@ -93,7 +100,7 @@ type EventDescriptor struct {
 //		- `string` for any other values.
 //
 // Take a look at `TestParsing` for possible EventProperties values.
-func (e *Event) EventProperties() (map[string]interface{}, error) {
+func (e *Event) EventProperties(includeRawEvent bool) (map[string]interface{}, error) {
 	if e.eventRecord == nil {
 		return nil, fmt.Errorf("usage of Event is invalid outside of EventCallback")
 	}
@@ -105,6 +112,10 @@ func (e *Event) EventProperties() (map[string]interface{}, error) {
 	}
 
 	p, err := newPropertyParser(e.eventRecord)
+	if includeRawEvent {
+		bbytes := unsafe.Slice((*byte)(e.eventRecord.UserData), e.eventRecord.UserDataLength)
+		e.RawEncodedEvent = base64.StdEncoding.EncodeToString(bbytes)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse event properties; %w", err)
 	}
@@ -262,6 +273,7 @@ func newPropertyParser(r C.PEVENT_RECORD) (*propertyParser, error) {
 			C.free(unsafe.Pointer(info))
 		}
 		return nil, fmt.Errorf("failed to get event information; %w", err)
+
 	}
 	ptrSize := unsafe.Sizeof(uint64(0))
 	if r.EventHeader.Flags&C.EVENT_HEADER_FLAG_32_BIT_HEADER == C.EVENT_HEADER_FLAG_32_BIT_HEADER {
@@ -507,17 +519,11 @@ func stampToTime(quadPart C.LONGLONG) time.Time {
 }
 
 // Creates UTF16 string from raw parts.
-//
-// Actually in go we have no way to make a slice from raw parts, ref:
-// - https://github.com/golang/go/issues/13656
-// - https://github.com/golang/go/issues/19367
-// So the recommended way is "a fake cast" to the array with maximal len
-// with a following slicing.
 // Ref: https://github.com/golang/go/wiki/cgo#turning-c-arrays-into-go-slices
 func createUTF16String(ptr uintptr, len int) string {
 	if len == 0 {
 		return ""
 	}
-	bytes := (*[1 << 29]uint16)(unsafe.Pointer(ptr))[:len:len]
+	bytes := unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), len)
 	return windows.UTF16ToString(bytes)
 }
